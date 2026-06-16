@@ -1,0 +1,51 @@
+FROM ubuntu:24.04
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    git \
+    curl \
+    wget \
+    build-essential \
+    cmake \
+    pkg-config \
+    autoconf \
+    automake \
+    libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go via official binary (latest stable, avoids stale Ubuntu package)
+RUN curl -sL https://go.dev/dl/go1.26.0.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Copy binaries from build context
+COPY syft /usr/local/bin/syft
+COPY witness /usr/local/bin/witness
+COPY sbomit /usr/local/bin/sbomit
+
+# Make binaries executable
+RUN chmod +x /usr/local/bin/syft \
+    && chmod +x /usr/local/bin/witness \
+    && chmod +x /usr/local/bin/sbomit
+
+# Copy witness configuration files to /root (default workdir)
+COPY .witness.yaml /root/.witness.yaml
+COPY testkey.pem /root/testkey.pem
+COPY testpub.pem /root/testpub.pem
+COPY witness_nettrace_proxy/ /root/witness_nettrace_proxy/
+
+# Install witness CA certificate for MITM tracing
+RUN cp /root/witness_nettrace_proxy/ca_cert.pem \
+    /usr/local/share/ca-certificates/witness-ca.crt \
+    && update-ca-certificates
+
+# Set default workdir
+WORKDIR /root
+
+# Run as root for BPF support (required for witness)
+USER root
+
+# Default shell
+SHELL ["/bin/bash", "-c"]
+
+CMD ["/bin/bash"]
