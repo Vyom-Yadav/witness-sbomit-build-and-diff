@@ -38,6 +38,11 @@ cd sbomit-accuracy-analyzer-agent
 cp .env.example .env
 # Edit .env with your API keys
 
+# Configure binary paths for base image
+# Edit .env and set:
+#   SBOMIT_BINARY_DIR=/path/to/witness-data
+#   SBOMIT_SBOMIT_DIR=/path/to/sbomit
+
 # Build base Docker image (contains all binaries)
 ./scripts/build-base-image.sh
 
@@ -47,6 +52,33 @@ pip install -e ".[dev]"
 uv pip install -e ".[dev]"
 ```
 
+### Prerequisites for Building Base Image
+
+Before running `./scripts/build-base-image.sh`, ensure:
+
+1. **Configure paths** in your `.env` file:
+   - `SBOMIT_BINARY_DIR` - Path to directory containing syft, witness binaries and witness config
+   - `SBOMIT_SBOMIT_DIR` - Path to directory containing sbomit binary
+
+2. **Required files in BINARY_DIR:**
+   - `syft` (binary, must be executable)
+   - `witness` (binary, must be executable)
+   - `.witness.yaml` (witness configuration)
+   - `testkey.pem` (signing key)
+   - `testpub.pem` (verification key)
+   - `witness_nettrace_proxy/` (directory with proxy and certs)
+
+3. **Required files in SBOMIT_DIR:**
+   - `sbomit` (binary, must be executable)
+
+4. **File permissions** - The following files must be readable:
+   ```bash
+   chmod 644 /path/to/witness-data/witness_nettrace_proxy/ca_key.pem
+   chmod +x /path/to/witness-data/syft
+   chmod +x /path/to/witness-data/witness
+   chmod +x /path/to/sbomit/sbomit
+   ```
+
 ### Run the Pipeline
 
 ```bash
@@ -54,7 +86,7 @@ uv pip install -e ".[dev]"
 temporal server start-dev
 
 # Start the worker (in a separate terminal)
-python -m src.orchestrator.client
+sbomit-analyzer worker
 
 # Run analysis (with commit SHA)
 sbomit-analyzer run \

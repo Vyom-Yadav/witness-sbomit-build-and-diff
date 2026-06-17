@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -13,21 +15,19 @@ from src.discovery.models import DiscoveryResult
 from src.discovery.prompts import DISCOVERY_SYSTEM_PROMPT
 from src.discovery.tools import list_directory, read_file_content, read_file_grep
 
-
 MAX_TOOL_OUTPUT = 8000
 MAX_CONTEXT_CHARS = 300000
 
 
 @tool
-def list_dir(path: str, max_depth: int = 2) -> str:
+def list_dir(path: str, max_depth: int = 3) -> str:
     """List directory structure at the given path, ignoring .git, node_modules, vendor, tests."""
     result = list_directory(path, max_depth)
     if len(result) > MAX_TOOL_OUTPUT:
         truncated = result[:MAX_TOOL_OUTPUT]
-        line_count = result.count("\n") + 1
         return (
             truncated
-            + f"\n... ({line_count} lines total, {len(result) - MAX_TOOL_OUTPUT} chars truncated). "
+            + f"\n... ({len(result) - MAX_TOOL_OUTPUT} chars truncated). "
             + "Use grep_file with regex patterns to search the full output."
         )
     return result
@@ -39,10 +39,9 @@ def read_file(filepath: str) -> str:
     result = read_file_content(filepath)
     if len(result) > MAX_TOOL_OUTPUT:
         truncated = result[:MAX_TOOL_OUTPUT]
-        line_count = result.count("\n") + 1
         return (
             truncated
-            + f"\n... ({line_count} lines total, {len(result) - MAX_TOOL_OUTPUT} chars truncated). "
+            + f"\n... ({len(result) - MAX_TOOL_OUTPUT} chars truncated). "
             + "Use grep_file with regex patterns on this filepath to search deeper."
         )
     return result
@@ -54,10 +53,9 @@ def grep_file(filepath: str, regex: str) -> str:
     result = read_file_grep(filepath, regex)
     if len(result) > 5000:
         truncated = result[:5000]
-        lines_shown = truncated.count("\n") + 1
         return (
             truncated
-            + f"\n... ({lines_shown} matches shown, {len(result) - 5000} chars truncated). "
+            + f"\n... ({len(result) - 5000} chars truncated). "
             + "Try a more specific regex to narrow results."
         )
     return result
@@ -94,16 +92,36 @@ def _build_graph() -> StateGraph:
 
 
 def _trim_messages(messages: list[BaseMessage], max_chars: int) -> list[BaseMessage]:
-    """Trim old messages to keep total context under max_chars."""
-    total = 0
+    """Trim old messages to keep total context under max_chars.
+
+    CRITICAL: Always preserves SystemMessage context guidelines and the initial Human target message.
+    """
+    if not messages:
+        return []
+
+    # Find and isolate foundation messages we cannot afford to lose
+    preserved: list[BaseMessage] = [m for m in messages if isinstance(m, SystemMessage)]
+    first_human = next((m for m in messages if isinstance(m, HumanMessage)), None)
+    if first_human and first_human not in preserved:
+        preserved.append(first_human)
+
+    # Compute their footprint
+    preserved_chars = sum(len(m.content if isinstance(m.content, str) else str(m.content)) for m in preserved)
+    total = preserved_chars
     kept: list[BaseMessage] = []
+
+    # Work backwards through history, packing only what fits
     for msg in reversed(messages):
+        if msg in preserved:
+            continue
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
-        total += len(content)
-        if total > max_chars:
+        content_len = len(content)
+        if total + content_len > max_chars:
             break
+        total += content_len
         kept.insert(0, msg)
-    return kept
+
+    return preserved + kept
 
 
 def _agent_node(state: DiscoveryState) -> dict[str, Any]:
@@ -118,10 +136,12 @@ def _agent_node(state: DiscoveryState) -> dict[str, Any]:
     llm_with_tools = llm.bind_tools(TOOLS)
 
     system_prompt = DISCOVERY_SYSTEM_PROMPT.format(max_tool_calls=settings.max_tool_calls)
-    trimmed = _trim_messages(state["messages"], MAX_CONTEXT_CHARS)
-    messages = [SystemMessage(content=system_prompt)] + trimmed
 
-    response = llm_with_tools.invoke(messages)
+    # Bundle system instructions into message state before passing to the trimmer
+    messages_with_system = [SystemMessage(content=system_prompt)] + state["messages"]
+    trimmed = _trim_messages(messages_with_system, MAX_CONTEXT_CHARS)
+
+    response = llm_with_tools.invoke(trimmed)
 
     new_loop_count = state["loop_count"] + 1
     return {
@@ -154,26 +174,32 @@ def _format_output(state: DiscoveryState) -> dict[str, Any]:
 
     format_messages = [
         SystemMessage(content=(
-            "Based on the analysis above, output a DiscoveryResult JSON. "
-            "If build command was not found, set confidence_score below 0.5. "
-            "Extract exact strings only — do not hallucinate."
+            "Based on the execution history, output a DiscoveryResult JSON object. "
+            "You MUST populate the `analysis` field FIRST with step-by-step reasoning explaining "
+            "why you chose this specific command, how you verified the Makefile/Taskfile configuration, "
+            "and how you explicitly ensured that testing/linting tasks are omitted. "
+            "If a valid build instruction was not found, set confidence_score below 0.5. Do not hallucinate."
         )),
     ] + _trim_messages(state["messages"], MAX_CONTEXT_CHARS // 2)
 
-    result: Any = llm_structured.invoke(format_messages)
+    try:
+        result: Any = llm_structured.invoke(format_messages)
+    except Exception as e:
+        import logging
+        import traceback
+
+        logger = logging.getLogger(__name__)
+        logger.error(f"LLM API call failed: {str(e)}")
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        raise
+
     if hasattr(result, "model_dump_json"):
         return {"messages": [HumanMessage(content=result.model_dump_json())]}
     return {"messages": [HumanMessage(content=str(result))]}
 
 
 async def discover_build(repo_url: str, commit_sha: str, repo_path: str) -> dict[str, Any]:
-    """Run the discovery agent and return the result as a dict.
-
-    Returns dict with keys: build_instruction, sbom_strategy, confidence_score, files_analyzed, discovery_context_path.
-    """
-    import json
-    from pathlib import Path
-
+    """Run the discovery agent and return the result as a dict."""
     graph = _build_graph().compile()
     initial_state: DiscoveryState = {
         "messages": [
@@ -214,6 +240,7 @@ async def discover_build(repo_url: str, commit_sha: str, repo_path: str) -> dict
     try:
         parsed = json.loads(content)
         return {
+            "analysis": parsed.get("analysis", ""),
             "build_instruction": parsed.get("build_instruction", {}),
             "sbom_strategy": parsed.get("sbom_strategy", {}),
             "confidence_score": parsed.get("confidence_score", 0.0),
@@ -222,8 +249,21 @@ async def discover_build(repo_url: str, commit_sha: str, repo_path: str) -> dict
         }
     except json.JSONDecodeError:
         return {
-            "build_instruction": {},
-            "sbom_strategy": {},
+            "analysis": "Failed to parse structured response from model.",
+            "build_instruction": {
+                "executable": "",  # Prevents KeyError
+                "arguments": [],
+                "env_vars": {},
+                "output_path": ".",
+                "container_project": False,
+                "binary_build_command": None,
+                "install_deps": []
+            },
+            "sbom_strategy": {
+                "inferred_target": "source",
+                "syft_target_path": "dir:.",
+                "reasoning": "Fallback default due to JSON parse failure."
+            },
             "confidence_score": 0.0,
             "files_analyzed": [],
             "discovery_context_path": str(context_path),

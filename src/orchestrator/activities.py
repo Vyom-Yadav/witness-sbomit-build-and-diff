@@ -44,16 +44,44 @@ async def discover_build_activity(
     activity.heartbeat("Cloning repository...")
 
     repo_path = Path("/tmp/sbomit_repo") / run_id
-    repo_path.mkdir(parents=True, exist_ok=True)
+
+    # Ensure parent directory exists
+    repo_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Remove existing directory if present (from previous failed attempts)
+    if repo_path.exists():
+        import shutil
+        shutil.rmtree(repo_path)
 
     clone_cmd = ["git", "clone", "--depth=1", repo_url, str(repo_path)]
-    subprocess.run(clone_cmd, check=True, capture_output=True, text=True)
+
+    # Run git without any user config (ignore SSH rewrite, credentials, etc.)
+    import os
+    env = os.environ.copy()
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+
+    try:
+        result = subprocess.run(clone_cmd, check=True, capture_output=True, text=True, env=env)
+    except subprocess.CalledProcessError as e:
+        activity.logger.error(f"Git clone failed with exit code {e.returncode}")
+        activity.logger.error(f"Command: {e.cmd}")
+        activity.logger.error(f"Stdout: {e.stdout}")
+        activity.logger.error(f"Stderr: {e.stderr}")
+        raise
 
     if commit_sha:
-        subprocess.run(
-            ["git", "-C", str(repo_path), "checkout", commit_sha],
-            check=True, capture_output=True, text=True,
-        )
+        checkout_cmd = ["git", "-C", str(repo_path), "checkout", commit_sha]
+        try:
+            subprocess.run(
+                checkout_cmd, check=True, capture_output=True, text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            activity.logger.error(f"Git checkout failed with exit code {e.returncode}")
+            activity.logger.error(f"Command: {e.cmd}")
+            activity.logger.error(f"Stdout: {e.stdout}")
+            activity.logger.error(f"Stderr: {e.stderr}")
+            raise
 
     activity.heartbeat("Running discovery agent...")
     result = await discover_build_fn(repo_url, commit_sha, str(repo_path))
@@ -96,6 +124,7 @@ async def execute_build_activity(
         witness_label=witness_label,
         base_image=settings.build_base_image,
         repo_path=repo_path,
+        run_id=run_id,
     )
 
     activity.heartbeat("Build complete, saving artifacts...")

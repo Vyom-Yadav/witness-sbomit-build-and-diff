@@ -360,5 +360,16 @@ def export(
     console.print(f"[green]Results exported to {output}[/green]")
 
 
+@app.command()
+def worker() -> None:
+    """Start the Temporal worker (run in separate terminal)."""
+    import asyncio
+
+    from src.orchestrator.client import start_worker
+
+    console.print(Panel("Starting Temporal worker...", style="bold green"))
+    asyncio.run(start_worker())
+
+
 if __name__ == "__main__":
     app()

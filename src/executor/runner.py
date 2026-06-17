@@ -4,11 +4,26 @@ import shlex
 from pathlib import Path
 
 import dagger
+from dagger.client.gen import FileType
 from temporalio import activity
 
 ATTESTATION_CONTAINER_PATH = "/workspace/attestation.json"
 SBOM_SYFT_CONTAINER_PATH = "/workspace/sbom-syft.json"
 SBOM_SBOMIT_CONTAINER_PATH = "/workspace/sbom-sbomit.json"
+
+
+async def get_container_output(
+    container: dagger.Container,
+    container_path: str,
+) -> tuple[dagger.File | dagger.Directory, bool]:
+    """Returns (daggar_object, is_directory) for the given container path."""
+    stat_result = container.stat(container_path)
+    file_type = await stat_result.file_type()
+
+    if file_type == FileType.DIRECTORY:
+        return container.directory(container_path), True
+    else:
+        return container.file(container_path), False
 
 
 async def run_build(
@@ -17,9 +32,10 @@ async def run_build(
     build_instruction: dict,
     witness_label: str,
     repo_path: str,
+    run_id: str,
     base_image: str = "sbomit-analyzer:base",
 ) -> dict:
-    output_dir = Path("/tmp") / f"build_{witness_label}"
+    output_dir = Path("/tmp") / f"build_{run_id}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     dagger_log_path = output_dir / "dagger.log"
@@ -38,6 +54,11 @@ async def run_build(
                 container = container.with_exec(["apt-get", "install", "-y"] + install_deps)
 
             executable = build_instruction["executable"]
+            if not executable:
+                raise ValueError(
+                "Discovery agent failed to find a valid build executable. "
+                "The repository might not have standard build instructions, or manual intervention is required."
+            )
             arguments = build_instruction.get("arguments", [])
             env_vars = build_instruction.get("env_vars", {})
 
@@ -53,6 +74,7 @@ async def run_build(
                 "-o", ATTESTATION_CONTAINER_PATH,
                 "--experimental",
                 "-a", "network-trace",
+                # "--trace-backend", "ebpf", this depends on the witness binary being used
                 "--attestor-network-trace-ca-cert-path", "/root/witness_nettrace_proxy/ca_cert.pem",
                 "--attestor-network-trace-ca-key-path", "/root/witness_nettrace_proxy/ca_key.pem",
                 "--",
@@ -97,9 +119,12 @@ async def run_build(
             output_rel = build_instruction.get("output_path", ".")
             if output_rel != ".":
                 binary_container_path = f"/workspace/repo/{output_rel}"
-                binary_host_path.write_text(
-                    await container.file(binary_container_path).contents()
-                )
+                dag_obj, is_dir = await get_container_output(container, binary_container_path)
+                if is_dir:
+                    binary_host_path.mkdir(parents=True, exist_ok=True)
+                    await dag_obj.export(str(binary_host_path))
+                else:
+                    binary_host_path.write_text(await dag_obj.contents())
 
             activity.heartbeat("Extracting build artifacts and generating SBOMs...")
 
@@ -163,7 +188,13 @@ async def _generate_syft_sbom(
         syft_target = "dir:/workspace/source"
     else:
         output_rel = build_instruction.get("output_path", ".")
-        syft_target = sbom_strategy.get("syft_target_path", f"file:./{output_rel}")
+        if output_rel != ".":
+            binary_container_path = f"/workspace/repo/{output_rel}"
+            _, is_dir = await get_container_output(container, binary_container_path)
+            syft_prefix = "dir" if is_dir else "file"
+            syft_target = sbom_strategy.get("syft_target_path", f"{syft_prefix}:./{output_rel}")
+        else:
+            syft_target = sbom_strategy.get("syft_target_path", "dir:/workspace/repo")
 
     syft_cmd = [
         "syft", "scan", syft_target,

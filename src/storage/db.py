@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from logging import getLogger
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
@@ -9,10 +10,13 @@ from src.config import settings
 from src.storage.models import Base
 
 
+logger = getLogger(__name__)
+
+
 def _get_db_url() -> str:
-    db_path = Path(settings.db_path)
+    db_path = Path(settings.db_path).resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    return f"sqlite:///{db_path.resolve()}"
+    return f"sqlite:///{db_path}"
 
 
 engine = create_engine(
@@ -32,9 +36,15 @@ def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:  # noqa: A
 
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
+_initialized = False
+
 
 def init_db() -> None:
-    Base.metadata.create_all(bind=engine)
+    global _initialized
+    if not _initialized:
+        Base.metadata.create_all(bind=engine)
+        _initialized = True
+        logger.info("Database initialized at %s", settings.db_path)
 
 
 def get_session() -> Session:

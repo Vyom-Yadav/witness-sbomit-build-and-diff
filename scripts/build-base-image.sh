@@ -7,12 +7,41 @@ set -e
 
 echo "Building sbomit-analyzer:base image..."
 
-# Define paths
-BINARY_DIR="/home/vyomydv/test-witness"
-SBOMIT_DIR="/home/vyomydv/GolandProjects/sbomit"
+# Load configuration from environment or use defaults
+# Override these by setting environment variables before running this script
+# Or by creating a .env file in the project root
+
+# Try to load .env file if it exists
+if [ -f "$(dirname "$0")/../.env" ]; then
+    echo "Loading configuration from .env file..."
+    export $(grep -v '^#' "$(dirname "$0")/../.env" | xargs)
+fi
+
+# Define paths (can be overridden via environment variables)
+BINARY_DIR="${SBOMIT_BINARY_DIR:-/home/vyom.yadav@canonical.com/witness-data/}"
+SBOMIT_DIR="${SBOMIT_SBOMIT_DIR:-/home/vyom.yadav@canonical.com/git-pulls/sbomit/}"
 DOCKER_DIR="$(dirname "$0")/../docker"
 
-# Check permissions of ca_key.pem
+echo "Using BINARY_DIR: $BINARY_DIR"
+echo "Using SBOMIT_DIR: $SBOMIT_DIR"
+
+# Validate paths exist
+if [ ! -d "$BINARY_DIR" ]; then
+    echo "ERROR: BINARY_DIR does not exist: $BINARY_DIR"
+    echo "Set SBOMIT_BINARY_DIR environment variable or update the script"
+    exit 1
+fi
+
+if [ ! -d "$SBOMIT_DIR" ]; then
+    echo "ERROR: SBOMIT_DIR does not exist: $SBOMIT_DIR"
+    echo "Set SBOMIT_SBOMIT_DIR environment variable or update the script"
+    exit 1
+fi
+
+# Check permissions of required files
+echo "Checking file permissions..."
+
+# Check ca_key.pem permissions
 if [ ! -r "$BINARY_DIR/witness_nettrace_proxy/ca_key.pem" ]; then
     echo "ERROR: Cannot read $BINARY_DIR/witness_nettrace_proxy/ca_key.pem"
     echo "This file has restrictive permissions (owned by root)."
@@ -23,6 +52,25 @@ if [ ! -r "$BINARY_DIR/witness_nettrace_proxy/ca_key.pem" ]; then
     echo "Then re-run this script."
     exit 1
 fi
+
+# Check if binaries are executable
+for binary in "$BINARY_DIR/syft" "$BINARY_DIR/witness" "$SBOMIT_DIR/sbomit"; do
+    if [ -f "$binary" ] && [ ! -x "$binary" ]; then
+        echo "WARNING: $binary is not executable. Run: chmod +x $binary"
+    fi
+done
+
+# Check required files exist
+for file in "$BINARY_DIR/syft" "$BINARY_DIR/witness" "$BINARY_DIR/.witness.yaml" \
+            "$BINARY_DIR/testkey.pem" "$BINARY_DIR/testpub.pem" \
+            "$BINARY_DIR/witness_nettrace_proxy" "$SBOMIT_DIR/sbomit"; do
+    if [ ! -e "$file" ]; then
+        echo "ERROR: Required file/directory not found: $file"
+        exit 1
+    fi
+done
+
+echo "All required files found. Proceeding with build..."
 
 # Create temporary build context
 TEMP_DIR=$(mktemp -d)
