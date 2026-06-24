@@ -55,6 +55,15 @@ def save_build_instruction(
             session.commit()
 
 
+def save_reconciled_plan(run_id: str, plan: dict) -> None:
+    with get_session() as session:
+        stmt = select(Run).where(Run.id == run_id)
+        row = session.execute(stmt).first()
+        if row:
+            row[0].reconciled_plan = plan
+            session.commit()
+
+
 def save_build_artifact(
     run_id: str,
     witness_version: str,
@@ -175,6 +184,7 @@ def get_run(run_id: str) -> dict | None:
                 "confidence_score": run.confidence_score,
                 "build_instruction": run.build_instruction,
                 "sbom_strategy": run.sbom_strategy,
+                "reconciled_plan": run.reconciled_plan,
             }
     return None
 

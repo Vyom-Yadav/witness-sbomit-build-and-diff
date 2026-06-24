@@ -43,9 +43,17 @@ class SBOMAnalysisWorkflow:
 
         build_instruction = (state.discovery_result or {}).get("build_instruction", {})
         repo_path = (state.discovery_result or {}).get("repo_path", "")
+
+        state.reconciled_plan = await workflow.execute_activity(
+            "reconcile_deps_activity",
+            args=[state.run_id, build_instruction],
+            start_to_close_timeout=timedelta(minutes=10),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+
         state.build_result = await workflow.execute_activity(
             "execute_build_activity",
-            args=[state.run_id, build_instruction, "A", repo_path],
+            args=[state.run_id, build_instruction, "A", repo_path, state.reconciled_plan],
             start_to_close_timeout=timedelta(minutes=90),
             retry_policy=RetryPolicy(maximum_attempts=5),
         )

@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     build_base_image: str = "sbomit-analyzer:base"
 
     # Discovery agent
-    max_tool_calls: int = 4
+    max_tool_calls: int = 8
     min_confidence: float = 0.5
 
     # Storage

@@ -7,6 +7,7 @@ from enum import StrEnum
 
 class PipelineStep(StrEnum):
     DISCOVER = "discover"
+    RECONCILE = "reconcile"
     EXECUTE = "execute"
     ANALYZE_DIFF = "analyze_diff"
     CLASSIFY = "classify"
@@ -18,6 +19,7 @@ class PipelineStep(StrEnum):
 class PipelineState:
     run_id: str = ""
     discovery_result: dict | None = None
+    reconciled_plan: dict | None = None
     build_result: dict | None = None
     diff_result: dict | None = None
     classifications: list[dict] | None = None

@@ -9,6 +9,7 @@ from src.orchestrator.activities import (
     classify_diffs_activity,
     discover_build_activity,
     execute_build_activity,
+    reconcile_deps_activity,
     store_results_activity,
 )
 from src.orchestrator.models import HumanOverride, PipelineInput
@@ -25,6 +26,7 @@ async def start_worker() -> None:
         workflows=[SBOMAnalysisWorkflow],
         activities=[
             discover_build_activity,
+            reconcile_deps_activity,
             execute_build_activity,
             analyze_diff_activity,
             classify_diffs_activity,

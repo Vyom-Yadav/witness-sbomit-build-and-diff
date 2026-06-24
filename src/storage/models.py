@@ -17,6 +17,7 @@ class Base(DeclarativeBase):
 class RunStatus(StrEnum):
     PENDING = "pending"
     DISCOVERING = "discovering"
+    RECONCILING = "reconciling"
     BUILDING = "building"
     ANALYZING = "analyzing"
     CLASSIFYING = "classifying"
@@ -27,6 +28,7 @@ class RunStatus(StrEnum):
 
 class PipelineStep(StrEnum):
     DISCOVER = "discover"
+    RECONCILE = "reconcile"
     EXECUTE = "execute"
     ANALYZE_DIFF = "analyze_diff"
     CLASSIFY = "classify"
@@ -51,6 +53,7 @@ class Run(Base):
     build_instruction: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     sbom_strategy: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reconciled_plan: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     state_checkpoint: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     artifacts: Mapped[list[BuildArtifact]] = relationship(

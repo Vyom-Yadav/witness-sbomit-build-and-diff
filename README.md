@@ -137,11 +137,13 @@ src/
 ├── config.py           # Pydantic Settings (env vars)
 ├── discovery/          # LangGraph build discovery agent
 │   ├── graph.py        # State machine
-│   ├── tools.py        # list_dir, read_file, grep
-│   ├── models.py       # DiscoveryResult Pydantic model
-│   └── prompts.py      # System prompts
+│   ├── tools.py        # list_dir, read_file, grep, build_signal_manifest
+│   ├── models.py       # DiscoveryResult, ReconciledPlan Pydantic models
+│   └── prompts.py      # System prompts (discovery + dependency reconcile)
 ├── executor/           # Dagger build execution
 │   ├── runner.py       # Container build orchestration
+│   ├── reconcile.py    # Probe container + LLM dependency reconciliation
+│   ├── installer.py    # Toolchain install + version checks
 │   ├── witness.py      # Witness binary wrapper
 │   └── sbom_gen.py     # SBOM generation commands
 ├── analyzer/           # SBOM diff (deterministic)

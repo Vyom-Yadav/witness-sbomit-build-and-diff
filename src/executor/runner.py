@@ -34,6 +34,7 @@ async def run_build(
     repo_path: str,
     run_id: str,
     base_image: str = "sbomit-analyzer:base",
+    reconciled_plan: dict | None = None,
 ) -> dict:
     output_dir = Path("/tmp") / f"build_{run_id}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -48,10 +49,28 @@ async def run_build(
             container = container.with_workdir("/workspace/repo")
 
             install_deps = build_instruction.get("install_deps", [])
-            if install_deps:
-                activity.heartbeat(f"Installing system packages: {install_deps}")
-                container = container.with_exec(["apt-get", "update"])
-                container = container.with_exec(["apt-get", "install", "-y"] + install_deps)
+            toolchain_deps = build_instruction.get("toolchain_deps", [])
+
+            if install_deps or toolchain_deps:
+                from src.discovery.models import ReconciledPlan
+
+                if not reconciled_plan:
+                    raise ValueError(
+                        "build_instruction requires dependencies but no "
+                        "reconciled_plan was provided. Run reconcile_deps_activity first."
+                    )
+                plan = ReconciledPlan(**reconciled_plan)
+                activity.heartbeat(f"Reconciled plan: {plan.reasoning}")
+                if plan.deps_to_install:
+                    if any(d.install_method == "apt" for d in plan.deps_to_install):
+                        container = container.with_exec(["apt-get", "update"])
+                    for dep in plan.deps_to_install:
+                        activity.heartbeat(
+                            f"Installing {dep.name} ({dep.install_method}): {dep.reason}"
+                        )
+                        container = container.with_exec(["sh", "-c", dep.install_command])
+                else:
+                    activity.heartbeat("Reconciled plan: nothing to install.")
 
             executable = build_instruction["executable"]
             if not executable:

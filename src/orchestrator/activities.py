@@ -15,6 +15,7 @@ from src.storage import (
     save_build_instruction,
     save_classification,
     save_diffs,
+    save_reconciled_plan,
     update_run_status,
 )
 from src.storage.models import RunStatus
@@ -99,11 +100,58 @@ async def discover_build_activity(
 
 
 @activity.defn
+async def reconcile_deps_activity(
+    run_id: str,
+    build_instruction: dict,
+) -> dict:
+    """Probe the build container and produce a ReconciledPlan.
+
+    Spins up a short-lived dagger container just for probing (no build side
+    effects). The result is persisted so execute_build_activity can consume
+    it without re-probing, and so the plan is fully audit-trailed.
+    """
+    from pathlib import Path
+
+    from src.executor.reconcile import reconcile_dependencies
+
+    update_run_status(run_id, RunStatus.RECONCILING)
+    activity.heartbeat("Probing container for dependency reconciliation...")
+
+    install_deps = build_instruction.get("install_deps", [])
+    toolchain_deps = build_instruction.get("toolchain_deps", [])
+
+    if not install_deps and not toolchain_deps:
+        plan_dict = {
+            "reasoning": "No dependencies requested in build_instruction.",
+            "deps_to_install": [],
+        }
+        save_reconciled_plan(run_id, plan_dict)
+        return plan_dict
+
+    import dagger
+    log_path = Path("/tmp") / f"reconcile_{run_id}.log"
+    with open(str(log_path), "a") as log_file:
+        async with dagger.Connection(dagger.Config(log_output=log_file)) as client:
+            image_tar = client.host().file("/tmp/sbomit-base.tar")
+            container = client.container().import_(image_tar)
+
+            plan = await reconcile_dependencies(container, install_deps, toolchain_deps)
+
+    plan_dict = plan.model_dump()
+    save_reconciled_plan(run_id, plan_dict)
+    activity.heartbeat(
+        f"Reconciliation complete: {len(plan.deps_to_install)} deps to install"
+    )
+    return plan_dict
+
+
+@activity.defn
 async def execute_build_activity(
     run_id: str,
     build_instruction: dict,
     witness_label: str,
     repo_path: str,
+    reconciled_plan: dict | None = None,
 ) -> dict:
     """Execute a build with witness, using the pre-cloned repo."""
     update_run_status(run_id, RunStatus.BUILDING)
@@ -125,6 +173,7 @@ async def execute_build_activity(
         base_image=settings.build_base_image,
         repo_path=repo_path,
         run_id=run_id,
+        reconciled_plan=reconciled_plan,
     )
 
     activity.heartbeat("Build complete, saving artifacts...")
