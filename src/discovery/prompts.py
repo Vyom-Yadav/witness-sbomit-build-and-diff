@@ -97,12 +97,24 @@ Ruby), you MUST use the `toolchain_deps` field with structured information:
 - **apt**: For C/C++ system packages only (gcc-13, cmake, autoconf, etc.)
 - **binary**: Download official binary from project website (recommended for Node.js, Python)
   - Example for Node.js 20.x: `curl -fsSL https://nodejs.org/dist/v20.0.0/node-v20.0.0-linux-x64.tar.gz | tar -xz -C /usr/local --strip-components=1`
-  - Example for Go: `curl -fsSL https://go.dev/dl/go1.21.0.linux-amd64.tar.gz | tar -C /usr/local -xz`
+  - Example for Go: `curl -fsSL https://go.dev/dl/go1.21.0.linux-amd64.tar.gz && rm -rf /usr/local/go && tar -C /usr/local -xzf go1.21.0.linux-amd64.tar.gz && ln -sf /usr/local/go/bin/go /usr/local/bin/go`
 - **rustup**: For Rust toolchains
   - Example: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -v 1.75.0`
 - **npm**: For npm-installed global tools
 - **pip**: For Python packages
 - **cargo**: For Rust crates
+
+### Critical: Container Isolation Rules
+- **NEVER use ``export PATH=...``** in install commands. The container runs each \
+  command in a fresh shell, so ``export`` has zero persistent effect. The binary \
+  will be invisible to subsequent build steps.
+- **Always use ``ln -sf`` to create a symlink** from the installed binary to a \
+  directory already in the system PATH (e.g. ``/usr/local/bin/go``, ``/usr/local/bin/node``).
+- **Replace ``wget`` with ``curl -fsSL``** — ``wget`` is not universally available in \
+  minimal container images, while ``curl`` is in the base image.
+- **Never use shell pipes (``|``) with ``wget``/``curl`` as the sole download method** \
+  when the archive filename must be referenced later. Use explicit download + extract + \
+  symlink steps with ``&&`` chaining.
 
 ### Version Verification:
 Always provide:
@@ -193,58 +205,129 @@ downstream extraction will be. Do NOT wrap this in JSON.
 """
 
 BUILD_COMMAND_PROMPT = """\
-You are a Build Command Extractor. You have read the analysis and reasoning below. \
-Your job is to extract ONLY the build command details: executable, arguments, and \
-environment variables. Output these as a structured JSON object with the exact fields:
-`executable`, `arguments`, `env_vars`.
+You are a Build Command Extractor. Below is a detailed analysis of a repository's \
+build process. Your job is to extract the EXACT build command from this analysis \
+into three fields: ``executable``, ``arguments``, ``env_vars``.
 
-## Rules
-- The executable must be the base tool (e.g. 'make', 'go', 'npm') — no targets/flags.
-- The arguments must be the exact arguments list (e.g. ['build', '-o', 'bin']).
-- The env_vars must be the exact key=value pairs.
-- Do NOT include install_deps, toolchain_deps, output_path, or any other field.
-- Do NOT add any commentary or explanation — just the JSON.
+## How to Extract
+Read the analysis carefully and find:
+- The **executable**: the base tool name (e.g. "make", "go", "npm"). Never include \
+  arguments, flags, or targets in this field.
+- The **arguments**: everything that comes after the executable — targets, flags, \
+  subcommands (e.g. ["build"], ["build", "-o", "bin"], ["server", "client", "cli"]).
+- The **env_vars**: every environment variable the build requires, as key=value pairs \
+  (e.g. {"CGO_ENABLED": "1", "GO111MODULE": "on"}).
+
+## What to Look For
+- If the analysis says "the build command is `make build-all`" → \
+  ``executable`` = "make", ``arguments`` = ["build-all"]
+- If the analysis says "the build uses `CGO_ENABLED=1`" → \
+  ``env_vars`` = {"CGO_ENABLED": "1"}
+- If the analysis describes a target like ``build`` or a flag like ``-o bin/app`` → \
+  put those in ``arguments``
+- If the analysis mentions any environment variable at all → \
+  put it in ``env_vars``
+- If the analysis gives BOTH a bare command ("make") AND an explicit command \
+  ("make build") → ALWAYS prefer the explicit one with arguments
+
+## Output
+Output ONLY a JSON object with ``executable``, ``arguments``, and ``env_vars``. \
+Do NOT include any other fields. Do NOT add commentary — just the JSON.
 """
 
 DEPENDENCIES_PROMPT = """\
-You are a Dependency Extractor. You have read the analysis and reasoning below, and \
-the extracted build command. Your job is to extract ONLY the dependencies the build \
-requires: system packages (`install_deps`) and language toolchains (`toolchain_deps`).
+You are a Dependency Extractor. Below is a detailed analysis of a repository's \
+build process plus the already-extracted build command. Your job is to extract \
+EVERY dependency the build requires into two lists: ``install_deps`` (apt system \
+packages) and ``toolchain_deps`` (language toolchains).
 
-## Rules
-- `install_deps`: only system packages needed via apt (e.g. 'libssl-dev', 'libsqlite3-dev').
-  Do NOT list common build tools like gcc, make, cmake — those are pre-installed.
-- `toolchain_deps`: structured objects for language toolchains (Go, Node, Rust, Python).
-  Each must include: name, version, install_command, install_method, verify_command,
-  version_match_hint.
-- Only list what the build ACTUALLY needs. Be minimal and accurate.
-- Do NOT add commentary — just the JSON with `install_deps` and `toolchain_deps`.
+## How to Extract
+Read the analysis carefully and find:
+- **install_deps**: System packages the build needs via apt. Look for mentions of \
+  library names like ``libssl-dev``, ``libsqlite3-dev``, ``libz-dev``. \
+  Do NOT include build tools like gcc, make, cmake — those are pre-installed.
+- **toolchain_deps**: Language toolchains (Go, Node, Rust, Python, etc.) with \
+  their version, install command, install method, and verification. Look for \
+  mentions of Go versions (e.g. "Go 1.18"), Node versions, Rust versions, etc.
+
+## What to Look For
+- If the analysis says "requires Go 1.18" → create a toolchain entry with \
+  ``name`` = "go", ``version`` = "1.18", ``install_method`` = "binary", \
+  ``install_command`` = "...", ``verify_command`` = "go version"
+- If the analysis says "links against libssl-dev" → add "libssl-dev" to \
+  ``install_deps``
+- If the analysis says "the build uses gcc, make, cmake" → these are \
+  pre-installed, do NOT add them to ``install_deps``
+- Every library or toolchain mentioned in the analysis that the build actually \
+  REQUIRES should appear in the output
+
+## Container Isolation Rules for ``install_command``
+- **NEVER use ``export PATH=...``** — the container runs each command in a \
+  fresh shell. ``export`` has no persistent effect.
+- **Always use ``ln -sf`` to create a symlink** from the installed binary to \
+  a directory in the default PATH (e.g. ``ln -sf /usr/local/go/bin/go /usr/local/bin/go``).
+- **Use ``curl -fsSL`` instead of ``wget``** when downloading — ``curl`` is in \
+  the base image, ``wget`` may not be.
+- **Chain download + extract + symlink with ``&&``** — the command must be a \
+  single self-contained line that makes the tool permanently available.
+
+## Output
+Output ONLY a JSON object with ``install_deps`` (list of strings) and \
+``toolchain_deps`` (list of objects with name, version, install_command, \
+install_method, verify_command, version_match_hint). No commentary.
 """
 
 SBOM_STRATEGY_PROMPT = """\
-You are an SBOM Strategy Extractor. You have read the analysis and reasoning, and the \
-extracted build command. Your job is to extract ONLY the SBOM scanning strategy.
+You are an SBOM Strategy Extractor. Below is a detailed analysis of a repository's \
+build process plus the already-extracted build command. Your job is to extract the \
+SBOM scanning strategy: where syft should point and why.
 
-## Rules
-- `inferred_target`: "binary" if the build produces a compiled artifact, "source" otherwise.
-- `syft_target_path`: the syft scan target (e.g. "file:./bin/app", "dir:.").
-- `reasoning`: which file or line informed this decision.
-- Do NOT add commentary — just the JSON with `inferred_target`, `syft_target_path`,
-  `reasoning`.
+## How to Extract
+Read the analysis and find:
+- **inferred_target**: "binary" if the build produces a compiled artifact, \
+  "source" if it's a source-only scan.
+- **syft_target_path**: the scan target path (e.g. "file:./bin/app", "dir:.").
+- **reasoning**: which file or line in the analysis informed this decision.
+
+## What to Look For
+- If the analysis says "scan the built binaries" or "binary output is at build/bin/" \
+  → ``inferred_target`` = "binary", ``syft_target_path`` = "file:./build/bin/"
+- If the analysis says "source tree scan" or "the project root" \
+  → ``inferred_target`` = "source", ``syft_target_path`` = "dir:."
+- If the analysis says "output path is cmd/" and there's a binary there \
+  → ``inferred_target`` = "binary", ``syft_target_path`` = "file:./cmd/"
+- Use the EXACT path from the analysis — do not invent paths.
+
+## Output
+Output ONLY a JSON object with ``inferred_target``, ``syft_target_path``, and \
+``reasoning``. No commentary.
 """
 
 OUTPUT_PATH_PROMPT = """\
-You are an Output Path Extractor. You have read the analysis and reasoning, and the \
-extracted build command. Your job is to extract ONLY the output path: where the build \
-produces its artifact relative to the workspace root.
+You are an Output Path Extractor. Below is a detailed analysis of a repository's \
+build process plus the already-extracted build command. Your job is to extract the \
+exact output path: where the build produces its artifact relative to the workspace \
+root.
 
-## Rules
-- `output_path`: a concrete path relative to workspace root (e.g. "bin/app", "dist/", ".").
-  "." means source-only or the workspace root itself.
-- `reasoning`: how you determined this path (e.g. from the `-o` flag, convention,
-  documentation).
-- Do NOT output wildcards or patterns. Output a concrete path.
-- Do NOT add commentary — just the JSON with `output_path` and `reasoning`.
+## How to Extract
+Read the analysis and find:
+- **output_path**: the EXACT relative path where the build output lands \
+  (e.g. "build/bin/", "cmd/", "dist/", "."). Use "." only if the build produces \
+  no separate artifact directory.
+- **reasoning**: a brief explanation of how this path was determined from the \
+  analysis (e.g. "from build/build.sh line 4").
+
+## What to Look For
+- If the analysis says "artifacts land under build/bin/" → \
+  ``output_path`` = "build/bin/"
+- If the analysis says "output is at cmd/" → ``output_path`` = "cmd/"
+- If the analysis says "the output path is build/bin/ relative to root" → \
+  ``output_path`` = "build/bin/"
+- NEVER output wildcards or patterns. Output a concrete path.
+- If the analysis describes multiple output locations, pick the primary one.
+
+## Output
+Output ONLY a JSON object with ``output_path`` and ``reasoning``. No commentary.
 """
 
 # ---------------------------------------------------------------------------
@@ -285,4 +368,34 @@ the list of dependencies that must be installed.
   why this dep is needed), ``verify_command`` (str, optional).
 - If everything is already satisfied, output an empty list [].
 - Do NOT add commentary — just the JSON array.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Confidence extraction prompt — separate so the model focuses only on the score
+# ---------------------------------------------------------------------------
+
+CONFIDENCE_EXTRACTION_PROMPT = """\
+You are a Confidence Assessor. Below is a detailed analysis of a repository's build \
+process. Your job is to extract ONLY the confidence score from the analysis.
+
+## How to Extract
+Read the analysis and find where it explicitly states a confidence value or \
+assessment. Look for:
+- Numeric scores like "Confidence: 0.85" or "confidence: 0.9"
+- Qualitative statements that map to scores (e.g. "highly confident" → 0.8,
+  "moderately confident" → 0.5, "uncertain" → 0.3)
+- A dedicated "Confidence Assessment" or "Confidence" section at the end
+  of the analysis
+
+## What to Look For
+- If the analysis says "Confidence: 0.85" → output 0.85
+- If the analysis says "I am highly confident (0.9)" → output 0.9
+- If there is NO explicit confidence score, but the analysis is thorough
+  and well-sourced → infer 0.7-0.8
+- If the analysis is vague or missing key details → infer 0.3-0.5
+- If the analysis says "confidence_score below 0.5" → output a value ≤ 0.5
+
+## Output
+Output ONLY a single float between 0.0 and 1.0. No commentary, no JSON wrapper.
 """

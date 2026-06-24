@@ -13,20 +13,11 @@ from langgraph.prebuilt import ToolNode
 from src.config import settings
 from src.discovery.extract_models import (
     DiscoveryAnalysis,
-    ExtractedBuildCommand,
-    ExtractedDependencies,
-    ExtractedOutputPath,
-    ExtractedSBOMStrategy,
-    ConfidenceScore,
 )
 from src.discovery.models import DiscoveryResult
 from src.discovery.prompts import (
-    BUILD_COMMAND_PROMPT,
-    DEPENDENCIES_PROMPT,
     DISCOVERY_REASONING_PROMPT,
     DISCOVERY_SYSTEM_PROMPT,
-    OUTPUT_PATH_PROMPT,
-    SBOM_STRATEGY_PROMPT,
 )
 from src.discovery.tools import (
     build_signal_manifest,
@@ -211,9 +202,7 @@ def _format_output(state: DiscoveryState) -> dict[str, Any]:
     # ground truth. Keep only ToolMessages (tool results) + the initial HumanMessage.
     reasoning_context: list[BaseMessage] = []
     for msg in tool_messages_raw:
-        if isinstance(msg, ToolMessage):
-            reasoning_context.append(msg)
-        elif isinstance(msg, HumanMessage):
+        if isinstance(msg, (ToolMessage, HumanMessage)):
             reasoning_context.append(msg)
 
     # Append the request at the END — a HumanMessage at the end triggers a response
@@ -258,156 +247,16 @@ def _format_output(state: DiscoveryState) -> dict[str, Any]:
             "a usable analysis. Setting confidence to 0."
         )
 
-    # ---- Step 2: Build Command (executable, arguments, env_vars) ----
-    build_cmd_llm = llm.with_structured_output(ExtractedBuildCommand)
-    build_cmd_messages: list[BaseMessage] = [
-        SystemMessage(
-            content=BUILD_COMMAND_PROMPT
-            + "\n\n=== ANALYSIS ===\n"
-            + analysis_text
-        ),
-    ]
+    # ---- Step 1: Reasoning (forced structured output) ----
+    # ...reasoning code stays... (kept as-is above) ...
 
-    try:
-        raw_cmd: Any = build_cmd_llm.invoke(build_cmd_messages)
-        if isinstance(raw_cmd, ExtractedBuildCommand):
-            build_cmd = raw_cmd
-        elif isinstance(raw_cmd, dict):
-            build_cmd = ExtractedBuildCommand(**raw_cmd)
-        else:
-            build_cmd = ExtractedBuildCommand(executable="", arguments=[], env_vars={})
-    except Exception:
-        logger.warning(f"Build command extraction failed: {traceback.format_exc()}")
-        build_cmd = ExtractedBuildCommand(executable="", arguments=[], env_vars={})
-
-    build_cmd_json = json.dumps(build_cmd.model_dump())
-
-    # ---- Step 3: Dependencies (install_deps + toolchain_deps) ----
-    deps_llm = llm.with_structured_output(ExtractedDependencies)
-    deps_messages: list[BaseMessage] = [
-        SystemMessage(
-            content=DEPENDENCIES_PROMPT
-            + "\n\n=== ANALYSIS ===\n"
-            + analysis_text
-            + "\n\n=== EXTRACTED BUILD COMMAND ===\n"
-            + build_cmd_json
-        ),
-    ]
-
-    try:
-        raw_deps: Any = deps_llm.invoke(deps_messages)
-        if isinstance(raw_deps, ExtractedDependencies):
-            deps = raw_deps
-        elif isinstance(raw_deps, dict):
-            deps = ExtractedDependencies(**raw_deps)
-        else:
-            deps = ExtractedDependencies(install_deps=[], toolchain_deps=[])
-    except Exception:
-        logger.warning(f"Dependency extraction failed: {traceback.format_exc()}")
-        deps = ExtractedDependencies(install_deps=[], toolchain_deps=[])
-
-    deps_json = json.dumps(deps.model_dump())
-
-    # ---- Step 4: SBOM Strategy ----
-    sbom_llm = llm.with_structured_output(ExtractedSBOMStrategy)
-    sbom_messages: list[BaseMessage] = [
-        SystemMessage(
-            content=SBOM_STRATEGY_PROMPT
-            + "\n\n=== ANALYSIS ===\n"
-            + analysis_text
-            + "\n\n=== EXTRACTED BUILD COMMAND ===\n"
-            + build_cmd_json
-        ),
-    ]
-
-    try:
-        raw_sbom: Any = sbom_llm.invoke(sbom_messages)
-        if isinstance(raw_sbom, ExtractedSBOMStrategy):
-            sbom_strat = raw_sbom
-        elif isinstance(raw_sbom, dict):
-            sbom_strat = ExtractedSBOMStrategy(**raw_sbom)
-        else:
-            sbom_strat = ExtractedSBOMStrategy(
-                inferred_target="source",
-                syft_target_path="dir:.",
-                reasoning="Extraction failed; defaulting to source scan.",
-            )
-    except Exception:
-        logger.warning(f"SBOM strategy extraction failed: {traceback.format_exc()}")
-        sbom_strat = ExtractedSBOMStrategy(
-            inferred_target="source",
-            syft_target_path="dir:.",
-            reasoning="Extraction failed; defaulting to source scan.",
-        )
-
-    # ---- Step 5: Output Path ----
-    output_llm = llm.with_structured_output(ExtractedOutputPath)
-    output_messages: list[BaseMessage] = [
-        SystemMessage(
-            content=OUTPUT_PATH_PROMPT
-            + "\n\n=== ANALYSIS ===\n"
-            + analysis_text
-            + "\n\n=== EXTRACTED BUILD COMMAND ===\n"
-            + build_cmd_json
-        ),
-    ]
-
-    try:
-        raw_output: Any = output_llm.invoke(output_messages)
-        if isinstance(raw_output, ExtractedOutputPath):
-            output_path = raw_output
-        elif isinstance(raw_output, dict):
-            output_path = ExtractedOutputPath(**raw_output)
-        else:
-            output_path = ExtractedOutputPath(
-                output_path=".",
-                reasoning="Extraction failed; defaulting to workspace root.",
-            )
-    except Exception:
-        logger.warning(f"Output path extraction failed: {traceback.format_exc()}")
-        output_path = ExtractedOutputPath(
-            output_path=".",
-            reasoning="Extraction failed; defaulting to workspace root.",
-        )
-
-    # ---- Step 6: Confidence Score ----
-    confidence_llm = llm.with_structured_output(ConfidenceScore)
-    confidence_messages: list[BaseMessage] = [
-        SystemMessage(
-            content=(
-                "Based on the analysis below, output a confidence score "
-                "between 0.0 and 1.0.\n\n"
-                "=== ANALYSIS ===\n"
-                + analysis_text
-            )
-        ),
-    ]
-
-    try:
-        raw_conf: Any = confidence_llm.invoke(confidence_messages)
-        if isinstance(raw_conf, ConfidenceScore):
-            confidence_score = raw_conf.confidence
-        elif isinstance(raw_conf, dict):
-            confidence_score = float(raw_conf.get("confidence", 0.0))
-        else:
-            confidence_score = 0.0
-    except Exception:
-        logger.warning(f"Confidence extraction failed: {traceback.format_exc()}")
-        confidence_score = 0.0
-
-    # ---- Assemble final DiscoveryResult dict ----
+    # ========================================================================
+    # Return ONLY the reasoning text and files_analyzed.
+    # Extraction steps are now individual Temporal activities so each step's
+    # input/output is recorded in the event history.
+    # ========================================================================
     result = {
-        "analysis": analysis_text,
-        "build_instruction": {
-            "executable": build_cmd.executable,
-            "arguments": build_cmd.arguments,
-            "env_vars": build_cmd.env_vars,
-            "output_path": output_path.output_path,
-            "install_deps": deps.install_deps,
-            "toolchain_deps": [t.model_dump() for t in deps.toolchain_deps],
-        },
-        "sbom_strategy": sbom_strat.model_dump(),
-        "confidence_score": confidence_score,
+        "analysis_text": analysis_text,
         "files_analyzed": files_analyzed,
     }
 
@@ -486,30 +335,15 @@ async def discover_build(repo_url: str, commit_sha: str, repo_path: str) -> dict
     try:
         parsed = json.loads(content)
         return {
-            "analysis": parsed.get("analysis", ""),
-            "build_instruction": parsed.get("build_instruction", {}),
-            "sbom_strategy": parsed.get("sbom_strategy", {}),
-            "confidence_score": parsed.get("confidence_score", 0.0),
+            "analysis_text": parsed.get("analysis_text", ""),
             "files_analyzed": parsed.get("files_analyzed", []),
             "discovery_context_path": str(context_path),
+            "repo_path": repo_path,
         }
     except json.JSONDecodeError:
         return {
-            "analysis": "Failed to parse structured response from model.",
-            "build_instruction": {
-                "executable": "",
-                "arguments": [],
-                "env_vars": {},
-                "output_path": ".",
-                "install_deps": [],
-                "toolchain_deps": [],
-            },
-            "sbom_strategy": {
-                "inferred_target": "source",
-                "syft_target_path": "dir:.",
-                "reasoning": "Fallback default due to JSON parse failure."
-            },
-            "confidence_score": 0.0,
+            "analysis_text": "Failed to parse structured response from model.",
             "files_analyzed": [],
             "discovery_context_path": str(context_path),
+            "repo_path": repo_path,
         }
