@@ -143,7 +143,7 @@ async def run_build(
                     binary_host_path.mkdir(parents=True, exist_ok=True)
                     await dag_obj.export(str(binary_host_path))
                 else:
-                    binary_host_path.write_text(await dag_obj.contents())
+                    await dag_obj.export(str(binary_host_path))
 
             activity.heartbeat("Extracting build artifacts and generating SBOMs...")
 
